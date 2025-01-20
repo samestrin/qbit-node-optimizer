@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>qBittorrent Dashboard</title>
+  <meta charset="UTF-8"/>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/semantic-ui/2.4.1/semantic.min.css">
+  <style>
+    table.data-table tbody tr:nth-child(odd) { background-color: #f9f9f9; }
+    table.data-table th {
+      cursor: pointer;
+      font-weight: bold;
+      font-size: 1rem; /* bigger than default */
+    }
+    #log-container {
+      max-height: 300px;
+      overflow-y: auto;
+      background: #f1f1f1;
+      margin-bottom: 1em;
+      padding: 0.5em;
+      font-family: monospace;
+      font-size: 0.9em;
+      border: 1px solid #ccc;
+    }
+    #modalOverlay {
+      position: fixed;
+      top:0; left:0; right:0; bottom:0;
+      background: rgba(0,0,0,0.6);
+      display: none;
+      justify-content: center;
+      align-items: center;
+    }
+    #modalBox {
+      background: #fff;
+      padding: 1em;
+      width: 600px;
+      border-radius: 5px;
+    }
+    .modal-close-btn {
+      float: right;
+      cursor: pointer;
+      color: #999;
+    }
+    .torrent-tags {
+      font-size: 0.8em;
+      color: #666;
+      margin-top: 2px;
+    }
+    .data-table td, .data-table th {
+      padding: 6px 8px !important;
+      font-size: 0.88em;
+    }
+    .ui.header {
+      font-size: 1.3em;
+    }
+    /* We’ll store the column name and direction in data attributes for the arrow. */
+    .sort-arrow {
+      margin-left: 4px;
+      font-weight: normal;
+    }
+    .torrent-name {
+      max-width: 250px;          /* Adjust as needed */
+      white-space: normal;       /* Allow text wrapping */
+      word-break: break-word;    /* Break words at arbitrary points */
+      overflow-wrap: anywhere;   /* Break words to fit the container */
+    }
+  </style>
+</head>
+<body>
+<div class="ui container">
+  <h1 class="ui header">
+    qBittorrent Dashboard
+    <% if (showRemoved) { %>
+      <span style="font-size:0.7em;">(Removed Torrents)</span>
+    <% } %>
+  </h1>
+  <!-- Toggle removed / main -->
+  <% if (showRemoved) { %>
+    <a class="ui button" href="/">Back to Main</a>
+  <% } else { %>
+    <a class="ui button" href="/removed">Show Removed Torrents</a>
+  <% } %>
+
+  <!-- Control Button -->
+<div>
+  <button id="reevaluateButton">Re-Evaluate All Torrents</button>
+  <form id="pollingForm">
+    <label for="pollingInterval">Polling Interval (mins):</label>
+    <input type="number" id="pollingInterval" name="interval" min="1" />
+    <button type="submit">Set</button>
+  </form>
+</div>
+
+<script>
+  document.getElementById("reevaluateButton").addEventListener("click", async () => {
+    try {
+      const response = await fetch("/api/reevaluate", { method: "POST" });
+      if (response.ok) {
+        alert("Re-evaluation triggered successfully!");
+      } else {
+        alert("Failed to trigger re-evaluation.");
+      }
+    } catch (error) {
+      console.error("Error triggering re-evaluation:", error);
+    }
+  });
+
+  document.getElementById("pollingForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const interval = document.getElementById("pollingInterval").value;
+    try {
+      const response = await fetch("/api/setPollingInterval", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ interval }),
+      });
+      if (response.ok) {
+        alert("Polling interval updated successfully!");
+      } else {
+        alert("Failed to update polling interval.");
+      }
+    } catch (error) {
+      console.error("Error updating polling interval:", error);
+    }
+  });
+</script>
+
+
+  <!-- Logs displayed here -->
+  <div id="log-container"></div>
+
+  <table class="ui celled table data-table" id="torrentTable">
+    <thead>
+      <tr>
+        <th data-sort="name">Title<span class="sort-arrow"></span></th>
+        <th data-sort="size">Size<span class="sort-arrow"></span></th>
+        <th data-sort="progress">%<span class="sort-arrow"></span></th>
+        <th data-sort="state">State<span class="sort-arrow"></span></th>
+        <th data-sort="eta">ETA<span class="sort-arrow"></span></th>
+        <th data-sort="dlspeed">Speed<span class="sort-arrow"></span></th>
+        <th>Seeds</th>
+        <th>Peers</th>
+        <th>Avail</th>
+        <th>Cat</th>
+        <th>S-Runs</th>
+        <th>R-Att</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      <% torrents.forEach(function(torrent) { %>
+      <tr>
+        <td>
+          <a href="#" class="torrent-title-link torrent-name" data-hash="<%= torrent.hash %>">
+            <%= torrent.name %>
+          </a>
+          <div class="torrent-tags">
+            <!-- If you had real tags in DB or from qb, show them here. -->
+          </div>
+        </td>
+        <td><%= torrent.size || 'N/A' %></td>
+        <td><%= (torrent.progress*100).toFixed(1) %>%</td>
+        <td><%= torrent.state %></td>
+        <td><%= torrent.eta %></td>
+        <td>
+          <% if (torrent.dlspeed > 0) { %>
+            <%= (torrent.dlspeed/1024).toFixed(1) %> KiB/s
+          <% } else { %>
+            0
+          <% } %>
+        </td>
+        <td><%= torrent.num_seeds || 'N/A' %></td>
+        <td><%= 'N/A' %></td> <!-- if you don't have peers info, show N/A -->
+        <td><%= 'N/A' %></td> <!-- if you don't have availability info, show N/A -->
+        <td>
+          <form class="category-form" data-hash="<%= torrent.hash %>" style="margin:0;">
+            <select name="category" style="font-size:0.85em;padding:2px 4px;">
+              <option value="">(none)</option>
+              <% categoryList.forEach(cat => { %>
+                <option value="<%= cat %>"
+                  <%= (torrent.category===cat ? 'selected' : '') %>
+                ><%= cat %></option>
+              <% }) %>
+            </select>
+            <button type="submit" style="font-size:0.75em;">Set</button>
+          </form>
+        </td>
+        <td><%= torrent.slow_runs %></td>
+        <td><%= torrent.recovery_attempts %></td>
+        <td>
+          <% if (torrent.state.startsWith('Paused') || torrent.state.startsWith('Pause') ) { %>
+            <!-- If it's paused => show Resume & Force Resume -->
+            <form action="/resume" method="POST" style="display:inline;">
+              <input type="hidden" name="hash" value="<%= torrent.hash %>"/>
+              <button class="ui green button" style="padding:2px 5px;">Resume</button>
+            </form>
+            <form action="/forceResume" method="POST" style="display:inline;">
+              <input type="hidden" name="hash" value="<%= torrent.hash %>"/>
+              <button class="ui orange button" style="padding:2px 5px;">Force</button>
+            </form>
+          <% } else { %>
+            <form action="/pause" method="POST" style="display:inline;">
+              <input type="hidden" name="hash" value="<%= torrent.hash %>"/>
+              <button class="ui red button" style="padding:2px 5px;">Pause</button>
+            </form>
+          <% } %>
+        </td>
+      </tr>
+      <% }); %>
+    </tbody>
+  </table>
+</div>
+
+<!-- Modal -->
+<div id="modalOverlay">
+  <div id="modalBox">
+    <span class="modal-close-btn" id="modalClose">&times;</span>
+    <h2 id="modalTitle">Torrent Details</h2>
+    <div id="modalContent">
+      <div><strong>Hash:</strong> <span id="detailHash"></span></div>
+      <div><strong>Name:</strong> <span id="detailName"></span></div>
+      <div><strong>State:</strong> <span id="detailState"></span></div>
+      <div><strong>Progress:</strong> <span id="detailProgress"></span></div>
+      <div><strong>Size:</strong> <span id="detailSize"></span></div>
+      <div><strong>Trackers:</strong>
+        <ul id="detailTrackers"></ul>
+      </div>
+      <hr/>
+      <canvas id="speedChart" width="580" height="200"></canvas>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+(function() {
+  // We'll keep track of the current sorted column & direction
+  let currentSortCol = null;
+  let currentSortDir = 1; // 1=asc, -1=desc
+
+  const table = document.getElementById('torrentTable');
+  const headers = table.querySelectorAll('th[data-sort]');
+
+  headers.forEach(hdr => {
+    hdr.addEventListener('click', () => {
+      const key = hdr.getAttribute('data-sort');
+
+      // If user clicks the same header, flip direction, else reset to 1
+      if (currentSortCol === key) {
+        currentSortDir = -currentSortDir;
+      } else {
+        currentSortCol = key;
+        currentSortDir = 1;
+      }
+      sortTable(table, key, currentSortDir);
+
+      // Clear arrows in all headers
+      headers.forEach(h => {
+        const arrowSpan = h.querySelector('.sort-arrow');
+        if (arrowSpan) {
+          arrowSpan.innerText = '';
+        }
+      });
+      // Set arrow for this header
+      const arrowSpan = hdr.querySelector('.sort-arrow');
+      if (arrowSpan) {
+        arrowSpan.innerText = currentSortDir === 1 ? '↑' : '↓';
+      }
+    });
+  });
+
+  function sortTable(tbl, key, dir) {
+    const tbody = tbl.querySelector('tbody');
+    const rows = Array.from(tbody.querySelectorAll('tr'));
+    rows.sort((a, b) => {
+      const cellA = getCellValue(a, key);
+      const cellB = getCellValue(b, key);
+      if (!isNaN(cellA) && !isNaN(cellB)) {
+        return (cellA - cellB) * dir;
+      }
+      return cellA.toString().localeCompare(cellB.toString()) * dir;
+    });
+    rows.forEach(r => tbody.appendChild(r));
+  }
+
+  function getCellValue(row, key) {
+    const tdMap = {
+      'name': 0,
+      'size': 1,
+      'progress': 2,
+      'state': 3,
+      'eta': 4,
+      'dlspeed': 5
+    };
+    const idx = tdMap[key] || 0;
+    const text = row.cells[idx].innerText;
+    const val = parseFloat(text.replace(/[^\d\.]/g, ''));
+    return isNaN(val) ? text : val;
+  }
+})();
+
+// logs auto-refresh
+(async function loadLogs() {
+  try {
+    const resp = await fetch('/logs');
+    if (!resp.ok) throw new Error('Failed to fetch logs');
+    const data = await resp.json();
+    const logContainer = document.getElementById('log-container');
+    logContainer.innerHTML = data.logs.join('<br/>');
+  } catch (err) {
+    console.log(err);
+  }
+  setTimeout(loadLogs, 5000);
+})();
+
+// Modal
+const modalOverlay = document.getElementById('modalOverlay');
+const modalClose = document.getElementById('modalClose');
+modalClose.onclick = () => {
+  modalOverlay.style.display = 'none';
+};
+
+document.querySelectorAll('.torrent-title-link').forEach(link => {
+  link.addEventListener('click', async (evt) => {
+    evt.preventDefault();
+    const hash = link.getAttribute('data-hash');
+    try {
+      const resp = await fetch(`/api/torrents/${hash}`);
+      if (!resp.ok) throw new Error('Fetch error');
+      const details = await resp.json();
+      showTorrentModal(details);
+    } catch (err) {
+      console.error('Error fetching details:', err);
+    }
+  });
+});
+
+let chartInstance = null;
+function showTorrentModal(details) {
+  modalOverlay.style.display = 'flex';
+  document.getElementById('detailHash').innerText = details.hash;
+  document.getElementById('detailName').innerText = details.name;
+  document.getElementById('detailState').innerText = details.state;
+  document.getElementById('detailProgress').innerText =
+    (details.progress*100).toFixed(1) + '%';
+  document.getElementById('detailSize').innerText = details.size || 'N/A';
+
+  const trackersList = document.getElementById('detailTrackers');
+  trackersList.innerHTML = '';
+  if (details.trackers) {
+    details.trackers.forEach(tr => {
+      const li = document.createElement('li');
+      li.textContent = `${tr.url} [status=${tr.status}] ${tr.msg || ''}`;
+      trackersList.appendChild(li);
+    });
+  }
+
+  const canvas = document.getElementById('speedChart');
+  if (chartInstance) {
+    chartInstance.destroy();
+  }
+  const labels = [];
+  const speeds = [];
+  if (details.history) {
+    details.history.forEach(h => {
+      const dateStr = new Date(h.timestamp * 1000).toLocaleTimeString();
+      labels.push(dateStr);
+      speeds.push(h.dlspeed);
+    });
+  }
+  chartInstance = new Chart(canvas, {
+    type: 'line',
+    data: {
+      labels: labels,
+      datasets: [{
+        label: 'Download Speed (B/s)',
+        data: speeds,
+        borderColor: 'rgb(75, 192, 192)',
+        tension: 0.1,
+        fill: false
+      }]
+    },
+    options: {
+      responsive: false,
+      scales: {
+        y: {
+          beginAtZero: true
+        }
+      }
+    }
+  });
+}
+
+// Category <select> submission
+document.querySelectorAll('.category-form').forEach(form => {
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const hash = form.getAttribute('data-hash');
+    const formData = new FormData(form);
+    const category = formData.get('category') || '';
+    try {
+      const resp = await fetch('/api/setCategory', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body: `hash=${encodeURIComponent(hash)}&category=${encodeURIComponent(category)}`
+      });
+      if (!resp.ok) {
+        alert('Failed to set category');
+        return;
+      }
+      location.reload();
+    } catch (err) {
+      console.error('Failed to set category:', err);
+    }
+  });
+});
+</script>
+</body>
+</html>

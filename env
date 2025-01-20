@@ -1,0 +1,76 @@
+# Web Interface
+WEB_BIND_IP=0.0.0.0
+WEB_BIND_PORT=3000
+
+# Qbittorrent API settings
+QB_API_URL=http://localhost:8080/api/v2
+QB_USERNAME=
+QB_PASSWORD=
+COOKIE=
+
+CATEGORY_NAMES="" # Comma separated list of categories established in Qbittorrent
+
+# Lock file for this app
+SELF_LOCK_FILE=/tmp/qbit_node_optimizer.lock
+
+# Lock file for the rsync media script
+RSYNC_LOCK_FILE=/tmp/rsync_media.lock
+
+# Winston log level
+LOG_LEVEL=info
+
+# Winston: store logs for 7 days
+LOG_MAX_DAYS=7
+
+# Minimum active torrents logic
+MINIMUM_LIVE_TORRENTS=10
+
+# Time thresholds
+STALL_THRESHOLD_SECONDS=300           # 5 minutes
+DL_TIME_OVERRIDE_SECONDS=14400        # 4 hours
+
+# Speed thresholds
+# 0.5 MB/s => 512 * 1024 = 524288
+SLOW_SPEED_THRESHOLD_BPS=524288
+
+# High Priority if forced start or
+# (progress > 95%) or (ETA < 4h) or (speed > 100 KiB/s)
+HIGH_PRIORITY_SPEED_BPS=102400
+HIGH_PRIORITY_PERCENT=95
+
+# Automatic unpause after this many hours paused
+AUTO_UNPAUSE_HOURS=4
+
+# Max attempts to re-pause or re-resume
+MAX_RECOVERY_ATTEMPTS=2
+
+# NordVPN usage
+ENABLE_NORDVPN=true
+
+# Tag for unregistered torrents
+UNREGISTERED_TAG=unregistered
+
+# Script-based optional feature: If "completed" folder size > RSYNC_MIN_SIZE => run RSYNC_SCRIPT
+RSYNC_FOLDER=""
+RSYNC_MIN_SIZE=20000000000  # 20GB in bytes
+RSYNC_SCRIPT=""
+# MAIN SCHEDULER CRON
+# This is used to run the main torrent-evaluation logic every X minutes
+SCHEDULER_CRON=*/5 * * * *
+
+# ========== NEW PULSE CONFIG ==========
+ENABLE_PULSE_DEAD_TORRENTS=true
+# Cron expression for daily or weekly pulse; for example, 2 AM daily:
+PULSE_CRON=0 2 * * *
+# How many minutes to keep the "dead" torrents unpaused before re-pausing:
+PULSE_DURATION_MIN=15
+# Batch size: how many "dead" torrents to attempt in each pulse
+PULSE_BATCH_SIZE=50
+
+# If you'd like to show logs in the UI, define how many lines to keep in memory
+MAX_INMEMORY_LOGS=200
+
+
+BANDWIDTH_BOOST_THRESHOLD=1024
+MAX_FORCED_TORRENTS=20
+MAX_FORCED_TORRENTS_GROUP=5
