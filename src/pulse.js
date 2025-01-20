@@ -6,31 +6,15 @@ const {
   resumeTorrent,
   reannounceTorrent,
 } = require("./qbittorrent");
-const {
-  pulseDurationMin,
-  pulseBatchSize,
-  stallThreshold,
-} = require("./config");
+const { pulseDurationMin, pulseBatchSize } = require("./config");
 
 /**
- * We define "dead/unconnected" torrents as those with:
- *  - Paused or stalled with 0 seeds, 0 speed, 0 ETA, or
- *  - Possibly anything we explicitly flagged as 'pulse-failed' in prior runs
- *
- * For simplicity, let's gather "paused" torrents with 0 seeds, 0 speed, 0 ETA.
- *
- * STEPS:
- * 1. Identify up to `pulseBatchSize` "dead" torrents.
- * 2. Resume them all.
- * 3. Force reannounce each to see if new peers appear.
- * 4. Wait `pulseDurationMin` minutes.
- * 5. Re-check them; if they remain at 0 seeds/0 speed => re-pause them.
+ * Once a day "pulse" for dead torrents, also unpauses any that have the "hard pause" tag (app_hard_paused),
+ * to see if they can recover, then re-pauses if still dead.
  */
-
 async function pulseDeadTorrents() {
   logObj.logger.info("[PULSE] Starting dead-torrents pulse...");
 
-  // 1. gather "dead" paused torrents
   let torrents;
   try {
     torrents = await getTorrentsInfo();
@@ -39,7 +23,7 @@ async function pulseDeadTorrents() {
     return;
   }
 
-  // define "dead" here:
+  // "dead" => paused or stalled + no speed/seeds/eta
   const deadCandidates = torrents.filter((t) => {
     const pausedOrStalled =
       t.state.startsWith("paused") || t.state === "stalledDL";
@@ -49,18 +33,25 @@ async function pulseDeadTorrents() {
     return pausedOrStalled && noSpeed && noSeeds && noEta;
   });
 
-  if (deadCandidates.length === 0) {
-    logObj.logger.info("[PULSE] No dead torrents found to pulse.");
+  // Also handle "app_hard_paused" to give them a second chance daily
+  const hardPaused = torrents.filter((t) => {
+    return t.tags && t.tags.includes("app_hard_paused");
+  });
+
+  const combined = [...deadCandidates, ...hardPaused].filter(
+    (v, i, a) => a.findIndex((x) => x.hash === v.hash) === i,
+  );
+
+  if (combined.length === 0) {
+    logObj.logger.info("[PULSE] No dead or hard-paused torrents to pulse.");
     return;
   }
 
-  // limit by batch
-  const toPulse = deadCandidates.slice(0, pulseBatchSize);
+  const toPulse = combined.slice(0, pulseBatchSize);
   logObj.logger.info(
-    `[PULSE] Found ${deadCandidates.length} dead torrents. Pulsing ${toPulse.length} in this batch.`,
+    `[PULSE] Found ${combined.length} to pulse. Pulsing ${toPulse.length} in this batch.`,
   );
 
-  // 2. resume them & reannounce
   for (const t of toPulse) {
     try {
       logObj.logger.info(`[PULSE] Resuming torrent: ${t.name}`);
@@ -74,14 +65,12 @@ async function pulseDeadTorrents() {
     }
   }
 
-  // 3. Wait `pulseDurationMin` minutes
   const waitMs = pulseDurationMin * 60 * 1000;
   logObj.logger.info(
     `[PULSE] Waiting ${pulseDurationMin} minutes before re-checking...`,
   );
   await delay(waitMs);
 
-  // 4. Re-check
   let updated;
   try {
     updated = await getTorrentsInfo();
@@ -92,7 +81,6 @@ async function pulseDeadTorrents() {
     return;
   }
 
-  // 5. If still no seeds, no speed => re-pause
   let pausedCount = 0;
   for (const t of updated) {
     if (toPulse.find((x) => x.hash === t.hash)) {
@@ -111,12 +99,11 @@ async function pulseDeadTorrents() {
         }
       } else {
         logObj.logger.info(
-          `[PULSE] Torrent ${t.name} shows some activity or seeds => keep active.`,
+          `[PULSE] Torrent ${t.name} shows some activity => keep active.`,
         );
       }
     }
   }
-
   logObj.logger.info(
     `[PULSE] Completed. Re-paused ${pausedCount} torrents still dead after the pulse.`,
   );

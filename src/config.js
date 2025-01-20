@@ -96,4 +96,15 @@ module.exports = {
     .split(",")
     .map((t) => t.trim())
     .filter((t) => t.length > 0),
+
+  extraTrackers: (process.env.EXTRA_TRACKERS || "")
+    .split(",")
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0), // Additional trackers to add regardless
+
+  offpeakStart: parseInt(process.env.OFFPEAK_START || "1", 10), // e.g., 1 AM
+  offpeakEnd: parseInt(process.env.OFFPEAK_END || "5", 10), // e.g., 5 AM
+
+  // If we want to bump torrents with >= X seeds
+  highSeedThreshold: parseInt(process.env.HIGH_SEED_THRESHOLD || "10", 10),
 };

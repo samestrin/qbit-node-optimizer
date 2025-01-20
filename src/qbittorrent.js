@@ -1,12 +1,9 @@
-/** File: /qbit-node-optimizer/src/qbittorrent.js ***************************************/
-
 const axios = require("axios");
 const { exec } = require("child_process");
 const db = require("./db");
 const logObj = require("./logger");
 const config = require("./config");
 
-// Create a reusable Axios instance with qbittorrent's base URL & auth cookie
 const axiosInstance = axios.create({
   baseURL: config.qbApiUrl,
   headers: {
@@ -16,7 +13,7 @@ const axiosInstance = axios.create({
 });
 
 /**
- * Check if qBittorrent process is running via pgrep
+ * Checks if qbittorrent process is running locally (by pgrep).
  */
 async function isQbittorrentRunning() {
   return new Promise((resolve) => {
@@ -27,7 +24,7 @@ async function isQbittorrentRunning() {
 }
 
 /**
- * Attempt to restart qBittorrent
+ * Attempt to kill and restart qBittorrent.
  */
 async function restartQbittorrent() {
   logObj.logger.info("[QBIT] Attempting to restart qBittorrent...");
@@ -48,7 +45,7 @@ async function restartQbittorrent() {
 }
 
 /**
- * Fetch complete torrent info array
+ * Get general torrent info from qBittorrent.
  */
 async function getTorrentsInfo() {
   const resp = await axiosInstance.get("/torrents/info");
@@ -56,7 +53,7 @@ async function getTorrentsInfo() {
 }
 
 /**
- * Transfer info (speeds, etc.)
+ * Transfer info includes speeds, etc.
  */
 async function getTransferInfo() {
   const resp = await axiosInstance.get("/transfer/info");
@@ -64,21 +61,21 @@ async function getTransferInfo() {
 }
 
 /**
- * Pause a torrent
+ * Pause torrent by hash.
  */
 async function pauseTorrent(hash) {
   await axiosInstance.post("/torrents/pause", `hashes=${hash}`);
 }
 
 /**
- * Resume a torrent
+ * Resume torrent by hash.
  */
 async function resumeTorrent(hash) {
   await axiosInstance.post("/torrents/resume", `hashes=${hash}`);
 }
 
 /**
- * Force-resume a torrent
+ * Force-resume torrent (forces it to start ignoring queue rules).
  */
 async function forceResumeTorrent(hash) {
   await axiosInstance.post(
@@ -88,35 +85,35 @@ async function forceResumeTorrent(hash) {
 }
 
 /**
- * Move a torrent to top priority
+ * Move torrent to top priority.
  */
 async function topPriority(hash) {
   await axiosInstance.post("/torrents/topPrio", `hashes=${hash}`);
 }
 
 /**
- * Move a torrent to bottom priority
+ * Move torrent to bottom priority.
  */
 async function bottomPriority(hash) {
   await axiosInstance.post("/torrents/bottomPrio", `hashes=${hash}`);
 }
 
 /**
- * Re-check a torrent's data
+ * Re-check torrent data for hash.
  */
 async function recheckTorrent(hash) {
   await axiosInstance.post("/torrents/recheck", `hashes=${hash}`);
 }
 
 /**
- * Re-announce a torrent to trackers
+ * Re-announce torrent to trackers.
  */
 async function reannounceTorrent(hash) {
   await axiosInstance.post("/torrents/reannounce", `hashes=${hash}`);
 }
 
 /**
- * Set a torrent's category
+ * Set category on torrent.
  */
 async function setTorrentCategory(hash, category) {
   await axiosInstance.post(
@@ -126,7 +123,7 @@ async function setTorrentCategory(hash, category) {
 }
 
 /**
- * Add a tag to a torrent
+ * Add a tag to a torrent.
  */
 async function addTag(hash, tag) {
   const form = `hashes=${hash}&tags=${encodeURIComponent(tag)}`;
@@ -134,7 +131,7 @@ async function addTag(hash, tag) {
 }
 
 /**
- * Remove a tag from a torrent
+ * Remove a tag from a torrent.
  */
 async function removeTag(hash, tag) {
   const form = `hashes=${hash}&tags=${encodeURIComponent(tag)}`;
@@ -142,12 +139,11 @@ async function removeTag(hash, tag) {
 }
 
 /**
- * Insert or update torrent state in DB
+ * Save the torrent state in the DB, plus add to history.
  */
 function saveTorrentState(t) {
   const { hash, name, state, dlspeed, progress, eta, num_seeds, added_on } = t;
   const now = Math.floor(Date.now() / 1000);
-
   db.run(
     `
     INSERT INTO torrents
@@ -161,7 +157,7 @@ function saveTorrentState(t) {
       eta=excluded.eta,
       num_seeds=excluded.num_seeds,
       last_updated=excluded.last_updated
-  `,
+    `,
     [hash, name, state, dlspeed, progress, eta, num_seeds, added_on, now],
     (err) => {
       if (err) {
@@ -175,7 +171,7 @@ function saveTorrentState(t) {
     INSERT INTO torrent_history
     (hash, name, state, dlspeed, progress, eta, num_seeds, timestamp)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `,
+    `,
     [hash, name, state, dlspeed, progress, eta, num_seeds, now],
     (err) => {
       if (err) {
@@ -188,10 +184,9 @@ function saveTorrentState(t) {
 }
 
 /**
- * Add additional trackers to a torrent
+ * Add a list of trackers (array of strings) to a torrent.
  */
 async function addTrackers(hash, trackers) {
-  // qBittorrent expects newline-separated list in 'urls='
   const trackersStr = trackers.join("\n");
   const body = `hash=${hash}&urls=${encodeURIComponent(trackersStr)}`;
   await axiosInstance.post("/torrents/addTrackers", body);
@@ -213,5 +208,5 @@ module.exports = {
   addTag,
   removeTag,
   saveTorrentState,
-  addTrackers, // <-- NEW
+  addTrackers,
 };

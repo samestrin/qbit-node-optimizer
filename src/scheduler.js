@@ -1,9 +1,8 @@
-/** File: /qbit-node-optimizer/src/scheduler.js ***************************************/
-
 const axios = require("axios");
 const db = require("./db");
 const logObj = require("./logger");
 const config = require("./config");
+
 const {
   getTorrentsInfo,
   getTransferInfo,
@@ -17,7 +16,7 @@ const {
   saveTorrentState,
   addTag,
   removeTag,
-  addTrackers, // for fallback trackers
+  addTrackers,
 } = require("./qbittorrent");
 
 const {
@@ -30,10 +29,21 @@ const {
   autoUnpauseHours,
   maxRecoveryAttempts,
   unregisteredTag,
+  smallTorrentMaxSize,
+  extraTrackers,
+  fallbackTrackers,
+  recheckWindowStart,
+  recheckWindowEnd,
+  offpeakStart,
+  offpeakEnd,
+  highSeedThreshold,
+  bandwidthBoostThreshold,
+  maxForcedTorrents,
+  maxForcedTorrentsGroup,
 } = config;
 
 /**
- * Fetch trackers for a given torrent hash
+ * Fetch trackers for a specific torrent to check status messages.
  */
 async function fetchTrackers(hash) {
   try {
@@ -51,13 +61,10 @@ async function fetchTrackers(hash) {
     logObj.logger.error(
       `[TRACKERS] Error fetching trackers for ${hash}: ${err.message}`,
     );
-    throw err;
+    return [];
   }
 }
 
-/**
- * Add a tag to a torrent
- */
 async function tagTorrent(hash, tag) {
   try {
     await addTag(hash, tag);
@@ -68,9 +75,6 @@ async function tagTorrent(hash, tag) {
   }
 }
 
-/**
- * Remove a tag from a torrent
- */
 async function untagTorrent(hash, tag) {
   try {
     await removeTag(hash, tag);
@@ -82,7 +86,8 @@ async function untagTorrent(hash, tag) {
 }
 
 /**
- * Detect “unregistered” torrents by scanning tracker messages
+ * Check if torrent is unregistered (e.g. "Unregistered torrent" message)
+ * If so, pause it and tag.
  */
 async function checkUnregisteredTorrents(torrents) {
   for (const t of torrents) {
@@ -90,7 +95,6 @@ async function checkUnregisteredTorrents(torrents) {
     try {
       trackers = await fetchTrackers(t.hash);
     } catch (err) {
-      // skip if error
       continue;
     }
     const isUnregistered = trackers.some(
@@ -104,40 +108,28 @@ async function checkUnregisteredTorrents(torrents) {
         );
         await pauseTorrent(t.hash);
         await tagTorrent(t.hash, unregisteredTag);
-      } else {
-        logObj.logger.info(
-          `[UNREGISTERED] Torrent ${t.name} unregistered on at least one tracker, but cross-seeding is active.`,
-        );
       }
-    } else {
-      // no unregistered trackers
     }
   }
 }
 
 /**
- * Heuristic to determine if a torrent is high-priority
+ * Basic check: forced or near-complete or decent speed => high priority
  */
 function isHighPriority(t) {
-  // forced or sequential download
   const forcedStart = t.force_start === true || t.seq_dl === true;
   if (forcedStart) return true;
 
-  // near completion progress
   const progressPercent = t.progress * 100;
   if (progressPercent >= highPriorityPercent) return true;
-
-  // high actual download speed
   if (t.dlspeed > highPrioritySpeed) return true;
-
-  // short ETA
   if (t.eta > 0 && t.eta < dlTimeOverride) return true;
 
   return false;
 }
 
 /**
- * A torrent is “unconnected” if it has 0 seeds, 0 peers, 0 speed, 0 ETA
+ * A torrent is unconnected if it has no speed, no seeds, and no ETA
  */
 function isTorrentUnconnected(t) {
   const noSpeed = t.dlspeed === 0;
@@ -147,24 +139,21 @@ function isTorrentUnconnected(t) {
 }
 
 /**
- * Re-check only paused torrents that appear 100% complete,
- * but do so *only* between midnight and 5 AM.
+ * Recheck and auto-resume completed-but-paused torrents,
+ * but only within certain hours (recheckWindowStart..recheckWindowEnd).
  */
 async function recheckIfInWindow() {
   const now = new Date();
   const hour = now.getHours();
-  if (hour >= config.recheckWindowStart && hour < config.recheckWindowEnd) {
+  if (hour >= recheckWindowStart && hour < recheckWindowEnd) {
     await recheckAndResumeSmallest();
   } else {
     logObj.logger.info(
-      `[RECHECK] It's ${hour}h, outside the window ${config.recheckWindowStart}-${config.recheckWindowEnd}; skipping recheck.`,
+      `[RECHECK] It's ${hour}h, outside the window ${recheckWindowStart}-${recheckWindowEnd}; skipping recheck.`,
     );
   }
 }
 
-/**
- * Actually do the recheck for paused & completed torrents
- */
 async function recheckAndResumeSmallest() {
   let torrents;
   try {
@@ -173,17 +162,14 @@ async function recheckAndResumeSmallest() {
     logObj.logger.error(`[RECHECK] Can't fetch torrents info: ${err.message}`);
     return;
   }
-
   const pausedComplete = torrents.filter(
     (t) => t.state.startsWith("paused") && t.progress === 1.0,
   );
-
   pausedComplete.sort((a, b) => {
-    const sizeA = a.size ?? 0;
-    const sizeB = b.size ?? 0;
+    const sizeA = a.size || 0;
+    const sizeB = b.size || 0;
     return sizeA - sizeB;
   });
-
   for (const p of pausedComplete) {
     try {
       logObj.logger.info(
@@ -197,10 +183,9 @@ async function recheckAndResumeSmallest() {
     }
   }
 
-  // wait 5s
+  // wait a little
   await new Promise((resolve) => setTimeout(resolve, 5000));
 
-  // fetch updated info
   let updated;
   try {
     updated = await getTorrentsInfo();
@@ -211,7 +196,6 @@ async function recheckAndResumeSmallest() {
     return;
   }
 
-  // resume if still paused but verified complete
   for (const t of updated) {
     if (t.state.startsWith("paused") && t.progress === 1.0) {
       logObj.logger.info(
@@ -223,7 +207,8 @@ async function recheckAndResumeSmallest() {
 }
 
 /**
- * If trackers for a torrent are all "not working" (status=4), re-announce or add fallback
+ * If trackers are all not working => re-announce and add fallback + extra trackers.
+ * Also ensure we add extra trackers to any torrent missing them.
  */
 async function checkAndReannounceProblematic() {
   let torrents;
@@ -238,7 +223,6 @@ async function checkAndReannounceProblematic() {
     try {
       trackers = await fetchTrackers(t.hash);
     } catch (err) {
-      // skip
       continue;
     }
     const allNotWorking = trackers.every((tr) => tr.status === 4);
@@ -246,29 +230,46 @@ async function checkAndReannounceProblematic() {
       logObj.logger.info(
         `[REANNOUNCE] All trackers not working for ${t.name}.`,
       );
-
-      // Optionally add fallback trackers if configured
-      if (config.fallbackTrackers && config.fallbackTrackers.length > 0) {
+      const combined = [...fallbackTrackers, ...extraTrackers];
+      if (combined.length > 0) {
         logObj.logger.info(
-          `[REANNOUNCE] Adding fallback trackers to ${t.name}...`,
+          `[REANNOUNCE] Adding fallback+extra trackers to ${t.name}...`,
         );
         try {
-          await addTrackers(t.hash, config.fallbackTrackers);
+          await addTrackers(t.hash, combined);
         } catch (error) {
           logObj.logger.error(
-            `[REANNOUNCE] Failed to add fallback trackers: ${error.message}`,
+            `[REANNOUNCE] Failed to add fallback+extra trackers: ${error.message}`,
           );
         }
       }
-
-      // Re-announce after adding trackers
       await reannounceTorrent(t.hash);
+    } else {
+      // Ensure extra trackers are present
+      if (extraTrackers.length > 0) {
+        const existingUrls = trackers.map((tr) => tr.url.trim());
+        const missing = extraTrackers.filter(
+          (url) => !existingUrls.includes(url),
+        );
+        if (missing.length > 0) {
+          try {
+            await addTrackers(t.hash, missing);
+            logObj.logger.info(
+              `[REANNOUNCE] Added missing extra trackers to ${t.name}.`,
+            );
+          } catch (err) {
+            logObj.logger.error(
+              `[REANNOUNCE] Error adding missing trackers to ${t.name}: ${err.message}`,
+            );
+          }
+        }
+      }
     }
   }
 }
 
 /**
- * Bump extremely small torrents to top priority so they finish quickly
+ * Bump small torrents to top priority for quick finishes.
  */
 async function applySmallTorrentQuickWins() {
   let torrents;
@@ -278,14 +279,12 @@ async function applySmallTorrentQuickWins() {
     logObj.logger.error(`[SMALL_WIN] Error fetching: ${err.message}`);
     return;
   }
-
   for (const t of torrents) {
     if (
       t.size &&
-      t.size < config.smallTorrentMaxSize &&
+      t.size < smallTorrentMaxSize &&
       !t.state.startsWith("paused")
     ) {
-      // Bump it to top prio if it's actively downloading or available
       logObj.logger.info(
         `[SMALL_WIN] Bumping small torrent to top: ${t.name} (${t.size} bytes)`,
       );
@@ -295,45 +294,150 @@ async function applySmallTorrentQuickWins() {
 }
 
 /**
- * Heuristic-based priority adjustments
+ * Off-peak detection
+ */
+function isOffPeak() {
+  const hour = new Date().getHours();
+  if (offpeakStart < offpeakEnd) {
+    return hour >= offpeakStart && hour < offpeakEnd;
+  }
+  // handle scenario crossing midnight
+  return hour >= offpeakStart || hour < offpeakEnd;
+}
+
+/**
+ * If a torrent has many seeds, optionally bump it.
+ */
+async function applyHighSeedPriority() {
+  let torrents;
+  try {
+    torrents = await getTorrentsInfo();
+  } catch (err) {
+    logObj.logger.error(`[HIGHSEED] Error fetching: ${err.message}`);
+    return;
+  }
+  for (const t of torrents) {
+    if (
+      !t.state.startsWith("paused") &&
+      t.num_seeds >= highSeedThreshold &&
+      t.progress < 1.0
+    ) {
+      logObj.logger.info(
+        `[HIGHSEED] Torrent ${t.name} => top prio (seeds=${t.num_seeds}).`,
+      );
+      await topPriority(t.hash);
+    }
+  }
+}
+
+/**
+ * We keep the original "applySmartPriority()" that uses a score-based approach
+ * for older vs. fewer seeds logic. Preserves older feature.
  */
 async function applySmartPriority() {
   let torrents;
   try {
     torrents = await getTorrentsInfo();
   } catch (err) {
-    logObj.logger.error(`[SMARTPRIO] Error fetching: ${err.message}`);
+    logObj.logger.error(`[SMARTPRIO] Error fetching torrents: ${err.message}`);
     return;
   }
-  const now = Date.now() / 1000;
+  const now = Math.floor(Date.now() / 1000);
 
   for (const t of torrents) {
+    // original logic from your code:
     const ageSeconds = now - t.added_on;
     const ageDays = ageSeconds / 86400;
     const seeds = t.num_seeds || 0;
-    // sample scoring approach
+
+    // Example scoring from original code:
+    // score = ageDays * 2 - seeds / 10
     const score = ageDays * 2 - seeds / 10;
 
-    if (score > 5 && !t.state.startsWith("paused")) {
-      logObj.logger.info(
-        `[SMARTPRIO] Torrent ${t.name} => top prio (score ${score.toFixed(
-          2,
-        )}).`,
-      );
-      await topPriority(t.hash);
-    } else if (score < 0 && !t.state.startsWith("paused")) {
-      logObj.logger.info(
-        `[SMARTPRIO] Torrent ${t.name} => bottom prio (score ${score.toFixed(
-          2,
-        )}).`,
-      );
-      await bottomPriority(t.hash);
+    if (!t.state.startsWith("paused")) {
+      if (score > 5) {
+        // top prio
+        logObj.logger.info(
+          `[SMARTPRIO] Torrent ${t.name} => top prio (score ${score.toFixed(2)}).`,
+        );
+        await topPriority(t.hash);
+      } else if (score < 0) {
+        logObj.logger.info(
+          `[SMARTPRIO] Torrent ${t.name} => bottom prio (score ${score.toFixed(
+            2,
+          )}).`,
+        );
+        await bottomPriority(t.hash);
+      }
     }
   }
 }
 
 /**
- * If a torrent is removed in qBittorrent, mark it removed in our DB
+ * Possibly force torrents if total speed is below a threshold and we have capacity for forced torrents.
+ */
+async function applyBandwidthBoost() {
+  // If total speed < bandwidthBoostThreshold, let's force some torrents, up to maxForcedTorrents
+  const transfer = await getTransferInfo();
+  const currentSpeed = transfer.dl_info_speed || 0;
+
+  if (currentSpeed >= bandwidthBoostThreshold) {
+    logObj.logger.info(
+      `[BANDWIDTH_BOOST] Current speed >= threshold. No forced action.`,
+    );
+    return;
+  }
+
+  logObj.logger.info(
+    `[BANDWIDTH_BOOST] Current speed ${currentSpeed} < threshold ${bandwidthBoostThreshold}. Considering forced start.`,
+  );
+
+  let torrents = [];
+  try {
+    torrents = await getTorrentsInfo();
+  } catch (err) {
+    logObj.logger.error(
+      `[BANDWIDTH_BOOST] getTorrentsInfo error: ${err.message}`,
+    );
+    return;
+  }
+
+  // We'll only try to force if there is room under the max forced limit
+  const forced = torrents.filter((t) => t.force_start).length;
+  const canForce = maxForcedTorrents - forced;
+  if (canForce <= 0) {
+    logObj.logger.info(
+      `[BANDWIDTH_BOOST] Already at forced torrent limit (${maxForcedTorrents}).`,
+    );
+    return;
+  }
+
+  // If we want to limit how many are forced in a group, we can do so.
+  // We can pick a random or sorted approach. We'll do a small group approach:
+  let candidates = torrents.filter(
+    (t) =>
+      !t.force_start && // not already forced
+      t.state.startsWith("paused") &&
+      t.dlspeed === 0 &&
+      t.num_seeds > 0,
+  ); // example: paused but has seeds, might do well if forced?
+
+  // limit to maxForcedTorrentsGroup
+  candidates = candidates.slice(0, maxForcedTorrentsGroup);
+  for (const c of candidates) {
+    try {
+      logObj.logger.info(`[BANDWIDTH_BOOST] Force-resuming torrent: ${c.name}`);
+      await forceResumeTorrent(c.hash);
+    } catch (error) {
+      logObj.logger.error(
+        `[BANDWIDTH_BOOST] Error forcing ${c.name}: ${error.message}`,
+      );
+    }
+  }
+}
+
+/**
+ * Removes DB references to torrents no longer in the live list.
  */
 async function pruneRemovedTorrents(liveHashes) {
   db.all(`SELECT hash FROM torrents`, async (err, rows) => {
@@ -345,16 +449,12 @@ async function pruneRemovedTorrents(liveHashes) {
     }
     for (const row of rows) {
       if (!liveHashes.has(row.hash)) {
-        // Mark it removed in local DB
         db.run(`UPDATE torrents SET state='removed' WHERE hash=?`, [row.hash]);
       }
     }
   });
 }
 
-/**
- * Main scheduler loop
- */
 async function schedulerLoop(skipBecauseRsync) {
   if (skipBecauseRsync) {
     logObj.logger.warn(
@@ -371,20 +471,14 @@ async function schedulerLoop(skipBecauseRsync) {
     return;
   }
 
-  // Keep track of active/known hashes to detect removed torrents
   const liveHashes = new Set(torrents.map((t) => t.hash));
-
-  // Save updated states in DB
   for (const t of torrents) {
     saveTorrentState(t);
   }
-
   await pruneRemovedTorrents(liveHashes);
 
-  // Check unregistered
   await checkUnregisteredTorrents(torrents);
 
-  // Get global speed
   let transfer;
   try {
     transfer = await getTransferInfo();
@@ -395,12 +489,21 @@ async function schedulerLoop(skipBecauseRsync) {
   const totalSpeed = transfer.dl_info_speed || 0;
   logObj.logger.info(`[SCHEDULER] Current total speed: ${totalSpeed} B/s`);
 
-  // Evaluate each torrent for stalling, speed, etc.
+  // Check if it's offpeak
+  const offPeakNow = isOffPeak();
+  if (offPeakNow) {
+    logObj.logger.info(
+      "[SCHEDULER] Currently off-peak hours. Additional logic can apply.",
+    );
+    // You could allow more concurrency or skip certain pausing rules, etc.
+    // We'll just log it for demonstration.
+  }
+
+  // Evaluate stalling or slow torrents
   for (const t of torrents) {
-    // Tag high priority if it meets the heuristic
     if (isHighPriority(t)) {
       await tagTorrent(t.hash, "app_high_priority");
-      continue;
+      continue; // skip the stall checks below for high-prio torrents
     } else {
       await untagTorrent(t.hash, "app_high_priority");
     }
@@ -408,20 +511,18 @@ async function schedulerLoop(skipBecauseRsync) {
     const nowSec = Math.floor(Date.now() / 1000);
     const timeSinceAdded = nowSec - t.added_on;
 
-    // If no seeds/speed/eta after stallThreshold -> pause
     if (isTorrentUnconnected(t) && timeSinceAdded > stallThreshold) {
+      // Hard pause approach
       logObj.logger.info(
-        `[SCHEDULER] Torrent ${t.name} unconnected >${stallThreshold}s. Pausing.`,
+        `[SCHEDULER] Torrent ${t.name} unconnected >${stallThreshold}s. Pausing with HARD pause.`,
       );
       await pauseTorrent(t.hash);
       await markPausedTorrent(t);
-      await tagTorrent(t.hash, "app_stalled");
+      await tagTorrent(t.hash, "app_hard_paused");
       continue;
-    } else {
-      await untagTorrent(t.hash, "app_stalled");
     }
 
-    // If slow speed, track it in DB
+    // If it's just slow, increment slow_runs
     if (
       t.dlspeed < slowSpeedThreshold &&
       (t.state === "downloading" || t.state === "stalledDL")
@@ -434,7 +535,7 @@ async function schedulerLoop(skipBecauseRsync) {
     }
   }
 
-  // Pause torrents that have been slow for multiple runs
+  // Pause anything with slow_runs >= 2 => app_persistently_slow
   db.all(`SELECT * FROM torrents WHERE slow_runs >= 2`, async (err, rows) => {
     if (err) {
       logObj.logger.error(
@@ -453,32 +554,34 @@ async function schedulerLoop(skipBecauseRsync) {
     }
   });
 
-  // ~~~~~ NEW calls ~~~~~
-  // 1) Bump small torrents to top for quick wins
+  // Our "quick wins" for small torrents
   await applySmallTorrentQuickWins();
 
-  // 2) Only do rechecks if in [midnight..5am]
-  await recheckIfInWindow();
-
-  // 3) Re-announce or fix trackers if they're all not working
-  await checkAndReannounceProblematic();
-
-  // 4) Smart priority based on age, seeds, etc.
+  // Score-based approach from the original code
   await applySmartPriority();
 
-  // 5) Near-completion boost
+  // Re-check if we have capacity for forced starts (bandwidth boost logic)
+  await applyBandwidthBoost();
+
+  // Recheck in time window
+  await recheckIfInWindow();
+
+  // Reannounce problematic & add trackers
+  await checkAndReannounceProblematic();
+
+  // Also bump high-seed torrents if not paused
+  await applyHighSeedPriority();
+
+  // Near-completion
   await applyNearCompletionBoost();
 
-  // 6) Auto-unpause older paused torrents
+  // Normal auto-unpause for all but "hard paused"
   await autoUnpauseLongPaused(autoUnpauseHours);
 
-  // 7) Ensure minimum number of active downloads
+  // Ensure min active torrents
   await ensureMinimumActiveTorrents();
 }
 
-/**
- * Mark torrent as paused in DB with timestamp
- */
 async function markPausedTorrent(t) {
   const nowSec = Math.floor(Date.now() / 1000);
   db.run(
@@ -486,15 +589,13 @@ async function markPausedTorrent(t) {
     INSERT INTO paused_torrents (hash, name, paused_at)
     VALUES (?, ?, ?)
     ON CONFLICT(hash) DO UPDATE SET paused_at=excluded.paused_at
-  `,
+    `,
     [t.hash, t.name, nowSec],
   );
 }
 
-/**
- * Unpause torrents that have been paused for N hours
- */
 async function autoUnpauseLongPaused(hours) {
+  // Exclude "app_hard_paused" torrents
   const cutoff = Math.floor(Date.now() / 1000) - hours * 3600;
   db.all(
     `SELECT * FROM paused_torrents WHERE paused_at < ?`,
@@ -505,13 +606,30 @@ async function autoUnpauseLongPaused(hours) {
         return;
       }
       for (const row of rows) {
+        let torrentInfo;
+        try {
+          const list = await getTorrentsInfo();
+          torrentInfo = list.find((x) => x.hash === row.hash);
+        } catch (e) {
+          logObj.logger.error(
+            `[UNPAUSE] Error fetching torrent info: ${e.message}`,
+          );
+          continue;
+        }
+        if (
+          torrentInfo &&
+          torrentInfo.tags &&
+          torrentInfo.tags.includes("app_hard_paused")
+        ) {
+          // skip
+          continue;
+        }
         try {
           logObj.logger.info(
             `[UNPAUSE] Auto-unpausing after ${hours}h: ${row.name}`,
           );
           await resumeTorrent(row.hash);
           db.run(`DELETE FROM paused_torrents WHERE hash = ?`, [row.hash]);
-
           await untagTorrent(row.hash, "app_stalled");
           await untagTorrent(row.hash, "app_persistently_slow");
         } catch (error) {
@@ -524,9 +642,6 @@ async function autoUnpauseLongPaused(hours) {
   );
 }
 
-/**
- * Maintain at least minLiveTorrents active (downloading/forcedDL)
- */
 async function ensureMinimumActiveTorrents() {
   let torrents;
   try {
@@ -539,23 +654,27 @@ async function ensureMinimumActiveTorrents() {
     (t) => t.state === "downloading" || t.state === "forcedDL",
   );
   const activeCount = active.length;
-
   if (activeCount >= minLiveTorrents) {
     logObj.logger.info(
       `[MIN_ACTIVE] ${activeCount} active >= ${minLiveTorrents}. No action.`,
     );
     return;
   }
-
   const needed = minLiveTorrents - activeCount;
   logObj.logger.info(`[MIN_ACTIVE] Need ${needed} more active torrents.`);
 
   const paused = torrents.filter((t) => t.state.startsWith("paused"));
   shuffleArray(paused);
-
   let unpausedCount = 0;
+
   for (const p of paused) {
     if (unpausedCount >= needed) break;
+    if (p.tags && p.tags.includes("app_hard_paused")) {
+      logObj.logger.info(
+        `[MIN_ACTIVE] Skipping ${p.name} because it is HARD paused.`,
+      );
+      continue;
+    }
     const row = await getTorrentRow(p.hash);
     if (row && row.recovery_attempts >= maxRecoveryAttempts) {
       logObj.logger.warn(
@@ -579,9 +698,6 @@ async function ensureMinimumActiveTorrents() {
   }
 }
 
-/**
- * Shuffle an array in-place
- */
 function shuffleArray(array) {
   let i = array.length;
   while (i > 0) {
@@ -591,9 +707,6 @@ function shuffleArray(array) {
   }
 }
 
-/**
- * Get one row from torrents table
- */
 function getTorrentRow(hash) {
   return new Promise((resolve) => {
     db.get(`SELECT * FROM torrents WHERE hash=?`, [hash], (err, row) => {
@@ -606,9 +719,6 @@ function getTorrentRow(hash) {
   });
 }
 
-/**
- * Extra near-completion boost
- */
 async function applyNearCompletionBoost() {
   let torrents;
   try {
